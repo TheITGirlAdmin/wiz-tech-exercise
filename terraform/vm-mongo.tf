@@ -81,6 +81,15 @@ resource "azurerm_linux_virtual_machine" "mongo" {
     exercise_weakness = "outdated-os,public-ssh,overprivileged-identity"
     role              = "database"
   })
+
+  lifecycle {
+    # custom_data is cloud-init: it runs once at first boot to install and
+    # configure MongoDB. Re-rendering it later (for example when the password
+    # variable is supplied to CI differently than at the original apply) must
+    # NOT replace a running database server and destroy its data. Bootstrap
+    # data is deliberately ignored after the VM is created.
+    ignore_changes = [custom_data]
+  }
 }
 
 # ---------------------------------------------------------------------------
