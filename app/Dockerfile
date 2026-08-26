@@ -8,7 +8,7 @@
 #   docker build -t tasky:local app/
 
 # ---- build stage ----------------------------------------------------------
-FROM golang:1.19 AS build
+FROM golang:1.26 AS build
 
 WORKDIR /go/src/tasky
 COPY tasky/ .
@@ -16,7 +16,11 @@ RUN go mod download
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /go/src/tasky/tasky
 
 # ---- release stage --------------------------------------------------------
-FROM alpine:3.17.0 AS release
+FROM alpine:3.22 AS release
+
+# Pull the latest security patches published since the base-image snapshot
+# (keeps openssl and musl current without waiting for a new base tag).
+RUN apk --no-cache upgrade
 
 WORKDIR /app
 COPY --from=build /go/src/tasky/tasky  .
