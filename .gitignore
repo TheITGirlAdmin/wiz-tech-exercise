@@ -1,0 +1,48 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+**/tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Real variable values - NEVER commit (contains passwords, keys)
+terraform.tfvars
+*.auto.tfvars
+backend.conf
+
+# Secrets
+*.pem
+*.key
+id_rsa*
+wiz_exercise*
+kubeconfig
+*.kubeconfig
+
+# Bootstrap output - contains subscription / tenant / client IDs
+bootstrap-output.txt
+
+# Scanner output
+checkov-report.*
+trivy-report.*
+*.sarif
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Live environment endpoints for a deliberately vulnerable lab
+ENVIRONMENT.md
+
+# Evidence pack - contains live endpoints and the Mongo password (kept local, like ENVIRONMENT.md)
+docs/evidence/

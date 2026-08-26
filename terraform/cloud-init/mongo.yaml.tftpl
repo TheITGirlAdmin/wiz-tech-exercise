@@ -1,0 +1,116 @@
+#cloud-config
+package_update: true
+
+write_files:
+  # -------------------------------------------------------------------------
+  # MongoDB installation + hardening-to-spec
+  # -------------------------------------------------------------------------
+  - path: /opt/wiz/setup-mongo.sh
+    permissions: '0700'
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      exec > >(tee -a /var/log/wiz-setup.log) 2>&1
+
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y curl gnupg ca-certificates cron
+
+      # --- MongoDB ${mongo_version} (end-of-life - INTENTIONAL WEAKNESS) ----
+      curl -fsSL https://pgp.mongodb.com/server-${mongo_version}.asc \
+        | gpg -o /usr/share/keyrings/mongodb-server-${mongo_version}.gpg --dearmor
+      echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-${mongo_version}.gpg ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/${mongo_version} multiverse" \
+        > /etc/apt/sources.list.d/mongodb-org-${mongo_version}.list
+
+      apt-get update
+      apt-get install -y mongodb-org
+
+      systemctl enable mongod
+      systemctl start mongod
+      sleep 15
+
+      # --- Create the application user BEFORE authorization is enforced -----
+      mongo --quiet <<'EOJS'
+      db = db.getSiblingDB('admin');
+      if (db.getUser('${mongo_admin_username}') == null) {
+        db.createUser({
+          user: '${mongo_admin_username}',
+          pwd:  '${mongo_admin_password}',
+          roles: [ { role: 'root', db: 'admin' } ]
+        });
+      }
+      EOJS
+
+      # --- Listen on all interfaces, but require authentication -------------
+      # Network reachability is restricted to the AKS subnet by the NSG, and
+      # the brief explicitly requires database authentication to be enabled.
+      sed -i 's/^\( *\)bindIp:.*/\1bindIp: 0.0.0.0/' /etc/mongod.conf
+      if ! grep -q '^security:' /etc/mongod.conf; then
+        printf '\nsecurity:\n  authorization: enabled\n' >> /etc/mongod.conf
+      fi
+
+      systemctl restart mongod
+      sleep 10
+
+      # Seed the application database so the collection exists on first run
+      mongo --quiet -u '${mongo_admin_username}' -p '${mongo_admin_password}' \
+        --authenticationDatabase admin <<'EOJS'
+      db = db.getSiblingDB('${mongo_database}');
+      db.bootstrap.insertOne({ seeded: true });
+      EOJS
+
+      echo "MongoDB setup complete."
+
+  # -------------------------------------------------------------------------
+  # Daily backup to PUBLIC object storage  (INTENTIONAL WEAKNESS)
+  # -------------------------------------------------------------------------
+  - path: /opt/wiz/backup-mongo.sh
+    permissions: '0700'
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      exec > >(tee -a /var/log/wiz-backup.log) 2>&1
+
+      STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+      WORKDIR=/tmp/mongo-backup-$STAMP
+      ARCHIVE=/tmp/mongodump-$STAMP.gz
+
+      mkdir -p "$WORKDIR"
+
+      # Dump every database, compressed into a single archive
+      mongodump \
+        --username '${mongo_admin_username}' \
+        --password '${mongo_admin_password}' \
+        --authenticationDatabase admin \
+        --archive="$ARCHIVE" --gzip
+
+      # Authenticate with the VM's managed identity - no storage keys on disk
+      az login --identity --allow-no-subscriptions --only-show-errors >/dev/null
+
+      az storage blob upload \
+        --account-name '${storage_account_name}' \
+        --container-name '${storage_container_name}' \
+        --name "mongodump-$STAMP.gz" \
+        --file "$ARCHIVE" \
+        --auth-mode login \
+        --overwrite \
+        --only-show-errors
+
+      rm -rf "$WORKDIR" "$ARCHIVE"
+      echo "Backup $STAMP uploaded to ${storage_account_name}/${storage_container_name}"
+
+runcmd:
+  # Azure CLI - needed for managed-identity auth in the backup script
+  - [ bash, -lc, "curl -sL https://aka.ms/InstallAzureCLIDeb | bash" ]
+  - [ bash, -lc, "/opt/wiz/setup-mongo.sh" ]
+
+  # Daily backup at 02:00 UTC
+  - [ bash, -lc, "echo '0 2 * * * root /opt/wiz/backup-mongo.sh' > /etc/cron.d/mongo-backup" ]
+  - [ bash, -lc, "chmod 0644 /etc/cron.d/mongo-backup && systemctl restart cron" ]
+
+  # Run one backup immediately so there is evidence in the bucket for the demo
+  - [ bash, -lc, "/opt/wiz/backup-mongo.sh || echo 'initial backup failed - check /var/log/wiz-backup.log'" ]
+
+final_message: "Wiz exercise MongoDB host ready after $UPTIME seconds"

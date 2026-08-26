@@ -1,0 +1,26 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+#   cp terraform.tfvars.example terraform.tfvars
+
+subscription_id = "00000000-0000-0000-0000-000000000000"
+location        = "eastus"
+prefix          = "wizex"
+owner_tag       = "your-name"
+
+# Contents of ~/.ssh/wiz_exercise.pub (created by bootstrap/install-tools.ps1)
+ssh_public_key = "ssh-rsa AAAA... wiz-exercise"
+
+# Where detective-control alerts are delivered
+alert_email = "you@example.com"
+
+# Supply the Mongo password via the environment instead of this file:
+#   PowerShell:  $env:TF_VAR_mongo_admin_password = "<strong-password>"
+#   bash:        export TF_VAR_mongo_admin_password='<strong-password>'
+# mongo_admin_password = "do-not-put-it-here"
+
+# Set false while iterating to avoid Defender for Cloud charges,
+# then true before the panel demo.
+enable_defender_plans = true
+
+# Fall back to "resource_group" only if your CloudLabs subscription rejects
+# subscription-scope role assignments.
+vm_identity_role_scope = "subscription"
