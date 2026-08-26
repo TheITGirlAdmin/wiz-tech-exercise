@@ -34,9 +34,10 @@ locals {
   name = "${var.prefix}-${var.environment}"
 
   tags = {
-    project     = "wiz-technical-exercise"
-    environment = var.environment
-    managed_by  = "terraform"
-    owner       = var.owner_tag
+    project      = "wiz-technical-exercise"
+    environment  = var.environment
+    managed_by   = "terraform"
+    deployed_via = "github-actions"
+    owner        = var.owner_tag
   }
 }
