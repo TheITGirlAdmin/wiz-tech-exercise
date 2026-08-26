@@ -1,0 +1,227 @@
+name: IaC - Terraform
+
+# Pipeline 1 of 2: securely deploys the exercise environment as Infrastructure
+# as Code. Pull requests get scanned + planned; merges to main apply.
+
+on:
+  pull_request:
+    paths: ['terraform/**', '.github/workflows/iac.yml']
+  push:
+    branches: [main]
+    paths: ['terraform/**', '.github/workflows/iac.yml']
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'apply or destroy'
+        required: true
+        default: apply
+        type: choice
+        options: [apply, destroy]
+
+permissions:
+  id-token: write        # OIDC federation to Azure - no stored credentials
+  contents: read
+  pull-requests: write
+  security-events: write # upload SARIF to GitHub code scanning
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: '1.9.8'
+  ARM_USE_OIDC: 'true'
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_mongo_admin_password: ${{ secrets.MONGO_ADMIN_PASSWORD }}
+  TF_VAR_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
+  TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+
+jobs:
+  # ==========================================================================
+  # SECURITY GATE - scan the IaC before anything reaches Azure
+  # ==========================================================================
+  scan:
+    name: Scan IaC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Terraform fmt check
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - run: terraform -chdir=terraform fmt -check -recursive
+
+      # Checkov - policy-as-code scanning of the Terraform.
+      # soft_fail is FALSE: real misconfigurations break the build. The
+      # deliberate weaknesses carry inline `#checkov:skip=` comments with a
+      # justification, so they are consciously accepted rather than ignored.
+      - name: Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/
+          framework: terraform
+          soft_fail: false
+          output_format: cli,sarif
+          output_file_path: console,checkov.sarif
+
+      - name: Upload Checkov SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov.sarif
+          category: checkov
+
+      # Second opinion from a different engine - Trivy's IaC rules catch things
+      # Checkov's do not, and vice versa.
+      - name: Trivy IaC scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: terraform/
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'          # advisory - Checkov is the blocking gate
+          format: table
+
+  # ==========================================================================
+  # PLAN - runs on every PR so changes are reviewable before merge
+  # ==========================================================================
+  plan:
+    name: Plan
+    needs: scan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ secrets.TF_STATE_RG }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_SA }}" \
+            -backend-config="container_name=${{ secrets.TF_STATE_CONTAINER }}" \
+            -backend-config="key=wiz-exercise.tfstate" \
+            -backend-config="use_oidc=true"
+
+      - run: terraform -chdir=terraform validate
+
+      - name: Terraform plan
+        id: plan
+        working-directory: terraform
+        run: terraform plan -no-color -input=false -out=tfplan
+
+      - name: Comment plan on PR
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const body = `### Terraform plan: \`${{ steps.plan.outcome }}\`\n\nSee the workflow log for the full plan output.`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  # ==========================================================================
+  # APPLY - merges to main, or a manual dispatch
+  # ==========================================================================
+  apply:
+    name: Apply
+    needs: scan
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.action == 'apply'))
+    runs-on: ubuntu-latest
+    environment: production   # attach a required reviewer here for a manual gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ secrets.TF_STATE_RG }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_SA }}" \
+            -backend-config="container_name=${{ secrets.TF_STATE_CONTAINER }}" \
+            -backend-config="key=wiz-exercise.tfstate" \
+            -backend-config="use_oidc=true"
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: terraform apply -auto-approve -input=false
+
+      - name: Environment summary
+        working-directory: terraform
+        run: |
+          {
+            echo "## Environment deployed"
+            echo ""
+            echo "| Output | Value |"
+            echo "|---|---|"
+            echo "| Mongo VM public IP | $(terraform output -raw mongo_public_ip) |"
+            echo "| Public backup listing | $(terraform output -raw public_backup_listing_url) |"
+            echo "| ACR | $(terraform output -raw acr_login_server) |"
+            echo "| AKS | $(terraform output -raw aks_cluster_name) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================================
+  # DESTROY - manual only. Keeps CloudLabs spend down between work sessions.
+  # ==========================================================================
+  destroy:
+    name: Destroy
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ secrets.TF_STATE_RG }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_SA }}" \
+            -backend-config="container_name=${{ secrets.TF_STATE_CONTAINER }}" \
+            -backend-config="key=wiz-exercise.tfstate" \
+            -backend-config="use_oidc=true"
+
+      - name: Terraform destroy
+        working-directory: terraform
+        run: terraform destroy -auto-approve -input=false

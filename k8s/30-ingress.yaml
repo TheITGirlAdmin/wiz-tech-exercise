@@ -1,0 +1,28 @@
+# Exposes the application to the public internet.
+#
+# ingressClassName targets the AKS managed nginx ingress controller (enabled by
+# the web_app_routing block in terraform/aks.tf). That controller is fronted by
+# an Azure Standard Load Balancer with a public IP - satisfying the brief's
+# "exposed via a Kubernetes ingress and CSP load balancer" requirement.
+#
+# The nodes themselves stay in the private subnet with no public IPs; the load
+# balancer is the only internet-facing component.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: tasky
+  namespace: tasky
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 10m
+spec:
+  ingressClassName: webapprouting.kubernetes.azure.com
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: tasky
+                port:
+                  number: 80

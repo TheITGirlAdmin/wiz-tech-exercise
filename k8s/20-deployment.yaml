@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tasky
+  namespace: tasky
+  labels:
+    app: tasky
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tasky
+  template:
+    metadata:
+      labels:
+        app: tasky
+    spec:
+      # Binds the pod to the cluster-admin ServiceAccount - see 10-rbac.yaml
+      serviceAccountName: tasky
+      containers:
+        - name: tasky
+          # __IMAGE__ is substituted by the app-deploy pipeline with the
+          # freshly built, digest-tagged image from ACR.
+          image: __IMAGE__
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # EXERCISE REQUIREMENT: MongoDB access is configured via an
+            # environment variable sourced from a Kubernetes Secret.
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: tasky-db
+                  key: MONGODB_URI
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tasky-db
+                  key: SECRET_KEY
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tasky
+  namespace: tasky
+spec:
+  type: ClusterIP
+  selector:
+    app: tasky
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

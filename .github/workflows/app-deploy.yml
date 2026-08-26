@@ -1,0 +1,188 @@
+name: App - Build, Scan, Deploy
+
+# Pipeline 2 of 2: builds the container image, scans it, pushes it to ACR and
+# triggers the Kubernetes deployment.
+
+on:
+  push:
+    branches: [main]
+    paths: ['app/**', 'k8s/**', '.github/workflows/app-deploy.yml']
+  pull_request:
+    paths: ['app/**', 'k8s/**', '.github/workflows/app-deploy.yml']
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+
+concurrency:
+  group: app-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: '1.9.8'
+  IMAGE_NAME: tasky
+
+jobs:
+  build:
+    name: Build, scan and deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------------
+      # Fail fast if the required file is missing or still a placeholder
+      # ---------------------------------------------------------------------
+      - name: Verify wizexercise.txt
+        run: |
+          set -euo pipefail
+          test -s app/wizexercise.txt || { echo "::error::app/wizexercise.txt is missing or empty"; exit 1; }
+          if grep -q 'REPLACE_WITH_YOUR_FULL_NAME' app/wizexercise.txt; then
+            echo "::error::app/wizexercise.txt still contains the placeholder - put your real name in it"
+            exit 1
+          fi
+          echo "wizexercise.txt contents:"; cat app/wizexercise.txt
+
+      - name: Verify vendored application source
+        run: |
+          set -euo pipefail
+          test -f app/tasky/go.mod || { echo "::error::app/tasky source is missing"; exit 1; }
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Read live infrastructure values straight from Terraform state - no
+      # copy-pasted IPs or registry names drifting out of sync.
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: terraform
+        env:
+          ARM_USE_OIDC: 'true'
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          terraform init \
+            -backend-config="resource_group_name=${{ secrets.TF_STATE_RG }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_SA }}" \
+            -backend-config="container_name=${{ secrets.TF_STATE_CONTAINER }}" \
+            -backend-config="key=wiz-exercise.tfstate" \
+            -backend-config="use_oidc=true"
+
+          {
+            echo "acr_login_server=$(terraform output -raw acr_login_server)"
+            echo "acr_name=$(terraform output -raw acr_name)"
+            echo "aks_name=$(terraform output -raw aks_cluster_name)"
+            echo "rg=$(terraform output -raw resource_group_name)"
+          } >> "$GITHUB_OUTPUT"
+
+          # Connection string is sensitive - route it through the env, masked
+          MONGODB_URI="$(terraform output -raw mongodb_uri)"
+          echo "::add-mask::$MONGODB_URI"
+          echo "MONGODB_URI=$MONGODB_URI" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: |
+          IMAGE="${{ steps.tf.outputs.acr_login_server }}/${IMAGE_NAME}:${GITHUB_SHA::7}"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          docker build -t "$IMAGE" app/
+
+      # ---------------------------------------------------------------------
+      # SECURITY GATE - the image is scanned BEFORE it is pushed anywhere.
+      # A failing scan means the image never reaches the registry or cluster.
+      # ---------------------------------------------------------------------
+      - name: Trivy image scan (blocking)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+      - name: Trivy image scan (SARIF for code scanning)
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          ignore-unfixed: true
+          exit-code: '0'
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      # Prove the required file is in the built image, not just the repo
+      - name: Verify wizexercise.txt inside the image
+        run: |
+          echo "--- cat /app/wizexercise.txt from the built image ---"
+          docker run --rm "$IMAGE" cat /app/wizexercise.txt
+
+      # ---------------------------------------------------------------------
+      # Push + deploy only from main
+      # ---------------------------------------------------------------------
+      - name: Push to ACR
+        if: github.ref == 'refs/heads/main'
+        run: |
+          az acr login --name "${{ steps.tf.outputs.acr_name }}"
+          docker push "$IMAGE"
+
+      - name: Get AKS credentials
+        if: github.ref == 'refs/heads/main'
+        run: |
+          az aks get-credentials \
+            --resource-group "${{ steps.tf.outputs.rg }}" \
+            --name "${{ steps.tf.outputs.aks_name }}" \
+            --overwrite-existing
+
+      - name: Deploy to Kubernetes
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+
+          kubectl apply -f k8s/00-namespace.yaml
+          kubectl apply -f k8s/10-rbac.yaml
+
+          # Database credentials land in the cluster as a Secret and reach the
+          # container as an environment variable (exercise requirement).
+          kubectl create secret generic tasky-db \
+            --namespace tasky \
+            --from-literal=MONGODB_URI="$MONGODB_URI" \
+            --from-literal=SECRET_KEY="${{ secrets.TASKY_SECRET_KEY }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          sed "s|__IMAGE__|${IMAGE}|g" k8s/20-deployment.yaml | kubectl apply -f -
+          kubectl apply -f k8s/30-ingress.yaml
+
+          kubectl rollout status deployment/tasky -n tasky --timeout=5m
+
+      - name: Post-deploy verification
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          echo "## Deployment verified" >> "$GITHUB_STEP_SUMMARY"
+
+          echo '### wizexercise.txt in the RUNNING container' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          kubectl exec -n tasky deploy/tasky -- cat /app/wizexercise.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo '### Ingress' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          kubectl get ingress -n tasky >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
