@@ -131,7 +131,7 @@ jobs:
       - name: Verify wizexercise.txt inside the image
         run: |
           echo "--- cat /app/wizexercise.txt from the built image ---"
-          docker run --rm "$IMAGE" cat /app/wizexercise.txt
+          docker run --rm --entrypoint cat "$IMAGE" /app/wizexercise.txt
 
       # ---------------------------------------------------------------------
       # Push + deploy only from main
