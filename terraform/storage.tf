@@ -57,3 +57,20 @@ resource "azurerm_role_assignment" "vm_blob_contributor" {
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = azurerm_linux_virtual_machine.mongo.identity[0].principal_id
 }
+
+# ===========================================================================
+# D4.6 DEMONSTRATION — a genuinely bad change that the Checkov gate MUST block.
+# This storage account forces TLS 1.0 and allows plaintext HTTP. These are NOT
+# baselined findings (the resource is new), so the gate fails the build and the
+# PR cannot merge. This block is never intended to reach Azure.
+# ===========================================================================
+resource "azurerm_storage_account" "insecure_demo" {
+  name                     = "wizexinsecuredemo"
+  resource_group_name      = azurerm_resource_group.main.name
+  location                 = azurerm_resource_group.main.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+
+  min_tls_version            = "TLS1_0" # insecure on purpose — trips CKV_AZURE_44
+  https_traffic_only_enabled = false    # insecure on purpose — trips CKV_AZURE_3
+}
