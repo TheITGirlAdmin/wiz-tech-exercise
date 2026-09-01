@@ -43,7 +43,7 @@ Every line of the brief, mapped to where it is implemented.
 
 | Requirement | Where |
 |---|---|
-| 1+ year outdated Linux | `terraform/variables.tf` → `vm_image` (Ubuntu 20.04, EOL Apr 2025) |
+| 1+ year outdated Linux | `terraform/variables.tf` → `vm_image` (Ubuntu 20.04, EOL May 2025) |
 | SSH exposed to internet | `terraform/network.tf` → `ssh_from_internet` |
 | Overly permissive CSP permissions | `terraform/vm-mongo.tf` → `vm_overprivileged_subscription` (Contributor @ subscription) |
 | 1+ year outdated MongoDB | `terraform/cloud-init/mongo.yaml.tftpl` (MongoDB 4.4, EOL Feb 2024) |
@@ -243,12 +243,25 @@ Show the same denial in Portal → Policy → Compliance.
 
 ### H. Detective controls
 
+**Lead with the tiering caveat before opening the console** - it is the point,
+not an excuse. This subscription runs Defender for Servers **Plan 1**, so the
+console surfaces the ~101 stale-package findings on the Mongo VM and nothing
+else. The adaptive-network-hardening recommendations that would flag the
+internet-exposed SSH port require **Plan 2**; the storage-public-access and
+Kubernetes-RBAC findings were never generated at all. Confirmed via Resource
+Graph as deliberate N/A, not lag - see `docs/day4-challenges.md` section 7.
+
 - Defender for Cloud → Recommendations, filtered to the exercise resource
-  group: public storage, missing OS patches, exposed management ports,
-  over-privileged identities.
+  group: **missing OS patches (~101 unpatched packages)**. Expect that category
+  and no other - say so before you click.
+- **Say:** "The console's coverage tracked my invoice, not my risk. A clean
+  management-ports section because you are on the cheaper tier is more dangerous
+  than an empty console, because it looks like coverage." Then prove the SSH
+  exposure and the public-bucket breach directly, as in the attack-path demo.
 - Log Analytics → run the two alert queries from `terraform/security.tf`.
 - Trigger them live: `kubectl exec` into a pod, and anonymously `curl` a
-  backup blob. Then show the alerts firing.
+  backup blob. Then show the alerts firing (`kubectl-exec-detected` fired 3x
+  on 2026-08-26).
 
 ### I. Pipeline security
 

@@ -46,3 +46,19 @@ ENVIRONMENT.md
 
 # Evidence pack - contains live endpoints and the Mongo password (kept local, like ENVIRONMENT.md)
 docs/evidence/
+
+# Demo command sheet - live endpoints, paste-ready (keep local, like ENVIRONMENT.md)
+docs/demo-command-sheet.*
+
+# Rendered doc artifacts (source of truth is the .md)
+*.pdf
+docs/*.html
+
+# Presentation deck - embeds evidence screenshots with live endpoints and the subscription ID
+*.pptx
+docs/deck-assets/
+docs/demo-portal-runbook.*
+
+# Pre-warm script - embeds the Log Analytics workspace GUID and the live
+# anonymously-readable backup container URL (keep local, like ENVIRONMENT.md)
+docs/prewarm-alerts.ps1
