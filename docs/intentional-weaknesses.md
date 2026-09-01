@@ -18,11 +18,11 @@ chosen, not missed.
 
 > *"VM should be leveraging a 1+ year outdated version of Linux"*
 
-**Built:** Ubuntu 20.04 LTS. Standard support ended **April 2025** — over a
+**Built:** Ubuntu 20.04 LTS. Standard support ended **May 2025** — over a
 year out of date. `terraform/variables.tf` → `vm_image`.
 
 **Why it matters:** no security patches. Every kernel and userland CVE
-disclosed since April 2025 is unpatched and permanently unpatchable without a
+disclosed since May 2025 is unpatched and permanently unpatchable without a
 distribution upgrade. An attacker doesn't need a novel exploit — public
 proof-of-concept code works.
 
